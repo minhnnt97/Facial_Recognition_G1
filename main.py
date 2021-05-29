@@ -29,8 +29,7 @@ def predict_frame(net, frame):
                                  crop=False)
 
     net.setInput(blob)
-    output_layers = net.getUnconnectedOutLayersNames()
-    outs = net.forward(output_layers)
+    outs = net.forward(OUTPUT_LAYERS)
     return outs
 
 
@@ -65,37 +64,38 @@ def get_final_boxes(outs, frame_height, frame_width):
     return (final_boxes, final_confidences)
 
 
-def draw_final_boxes(frame, final_boxes, final_confidences):
+def draw_final_boxes(frame, final_boxes, final_confidences, draw_boxes=True):
     num_faces_detected = len(final_boxes)
     if num_faces_detected > 0:
-        for i,box in enumerate(final_boxes):
-            # Extract position data
-            left   = box[0]
-            top    = box[1]
-            width  = box[2]
-            height = box[3]
+        if draw_boxes:
+            for i,box in enumerate(final_boxes):
+                # Extract position data
+                left   = box[0]
+                top    = box[1]
+                width  = box[2]
+                height = box[3]
 
 
-            # Draw bounding box with the above measurements
-            tl = (left, top)
-            br = (left+width, top+height)
-            cv2.rectangle(frame,
-                          tl,
-                          br,
-                          BOX_COLOR,
-                          2)
+                # Draw bounding box with the above measurements
+                tl = (left, top)
+                br = (left+width, top+height)
+                cv2.rectangle(frame,
+                              tl,
+                              br,
+                              BOX_COLOR,
+                              2)
 
 
-            # Display text about confidence rate above each box
-            text_confidence = f'{final_confidences[i]:.2f}'
-            text_origin = (left, top-10)
-            cv2.putText(frame,
-                        text_confidence,
-                        text_origin,
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        BOX_COLOR,
-                        2)
+                # Display text about confidence rate above each box
+                text_confidence = f'{final_confidences[i]:.2f}'
+                text_origin = (left, top-10)
+                cv2.putText(frame,
+                            text_confidence,
+                            text_origin,
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            1,
+                            BOX_COLOR,
+                            2)
 
 
         # Display text about number of detected faces on topleft corner
@@ -126,6 +126,7 @@ net = cv2.dnn.readNetFromDarknet(MODEL, WEIGHT)
 net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
 net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
+OUTPUT_LAYERS = net.getUnconnectedOutLayersNames()
 
 
 ################################################################################
