@@ -15,8 +15,7 @@ IMG_WIDTH, IMG_HEIGHT = 416, 416
 
 BOX_COLOR = (255,255,0) # BGR
 TEXT_ORIGIN_FACES = (10,50)
-
-
+CURRENT_NUM_SAMPLES = len(glob(os.path.join(SAMPLE_DIR, '*')))
 ################################################################################
 ######################        DEFINING FUNCTIONS        ########################
 ################################################################################
@@ -75,7 +74,6 @@ def draw_final_boxes(frame, final_boxes, final_confidences, draw_boxes=True):
                 width  = box[2]
                 height = box[3]
 
-
                 # Draw bounding box with the above measurements
                 tl = (left, top)
                 br = (left+width, top+height)
@@ -97,16 +95,15 @@ def draw_final_boxes(frame, final_boxes, final_confidences, draw_boxes=True):
                             BOX_COLOR,
                             2)
 
-
-        # Display text about number of detected faces on topleft corner
-        text_num_faces = f'Faces detected: {num_faces_detected}'
-        cv2.putText(frame,
-                    text_num_faces,
-                    TEXT_ORIGIN_FACES,
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    BOX_COLOR,
-                    2)
+            # Display text about number of detected faces on topleft corner
+            text_num_faces = f'Faces detected: {num_faces_detected}'
+            cv2.putText(frame,
+                        text_num_faces,
+                        TEXT_ORIGIN_FACES,
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        BOX_COLOR,
+                        2)
 
 
 ################################################################################
@@ -128,7 +125,6 @@ net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
 OUTPUT_LAYERS = net.getUnconnectedOutLayersNames()
 
-
 ################################################################################
 ####################         RUNNING THE CAMERA           ######################
 ################################################################################
@@ -146,7 +142,7 @@ while True:
     ####################
     predictions = predict_frame(net, frame)
     final_boxes, final_confidences = get_final_boxes(predictions, frame.shape[0], frame.shape[1])
-    draw_final_boxes(frame, final_boxes, final_confidences)
+    draw_final_boxes(frame, final_boxes, final_confidences, draw_boxes=False)
 
 
     # frame is now the image capture by the webcam (one frame of the video)
@@ -154,6 +150,14 @@ while True:
 
     c = cv2.waitKey(1)
     # Break when pressing ESC
+    if c == ord('c'):
+        box = final_boxes[0]
+        left   = box[0]
+        top    = box[1]
+        width  = box[2]
+        height = box[3]
+        cv2.imwrite(os.path.join(SAMPLE_DIR,f'{CURRENT_NUM_SAMPLES}.jpg'), frame[top:top+height, left:left+width])
+        CURRENT_NUM_SAMPLES += 1
     if c == 27:
         break
 
