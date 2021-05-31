@@ -2,7 +2,11 @@ import numpy as np
 import os
 import cv2
 import argparse
-import tensorflow as tf
+
+from architecture import *
+from threading import Thread
+from scipy import stats
+from sklearn.neighbors import KNeighborsClassifier
 from glob import glob
 
 
@@ -11,41 +15,82 @@ from glob import glob
 ################################################################################
 PROJECT = os.path.dirname(os.path.realpath(__file__))
 
+# DO NOT CHANGE
 IMG_WIDTH, IMG_HEIGHT = 416, 416
+CROP_W, CROP_H = 160, 160
+N_FEATURES = 128
+
+# CUSTOMIZATION
 BOX_COLOR = (255,255,0) # BGR
 TEXT_ORIGIN_FACES = (10,50)
+KNN_K = 11
+KNN_CUTOFF_DIST = 10
 
 
-# construct the argument parse and parse the arguments
+# ARGUMENT PARSER
 ap = argparse.ArgumentParser()
-ap.add_argument("-i", "--image", required=True,
-                help="name of the sub-directory for saving image")
-ap.add_argument("-y", "--yolo", required=True,
-                help="name of the sub-directory containing the YOLO model and weights")
 ap.add_argument('-m', '--model', required=True,
-                help='path to the .h5 file of the tensorflow model')
+                help='path to the .h5 file of the tensorflow model for feature extraction')
+ap.add_argument("-y", "--yolo", type=str, default='yolo',
+                help="name of the sub-directory containing the YOLO model and weights")
+ap.add_argument('-d', '--data', type=str, default='data',
+                help='name of the sub-directory containing the training images')
+ap.add_argument("-s", "--save", type=str, default='',
+                help="name of the sub-directory for saving image")
 ap.add_argument("-c", "--confidence", type=float, default=0.5,
                 help="minimum probability to filter weak detections")
 ap.add_argument("-t", "--threshold", type=float, default=0.4,
                 help="threshold when applying non-maxima suppression")
 args = vars(ap.parse_args())
 
+DATA_DIR            = os.path.join(PROJECT, args['data'])
+SAMPLE_DIR          = os.path.join(PROJECT, args['save'])
+YOLO_DIR            = os.path.join(PROJECT, args['yolo'])
 
-SAMPLE_DIR = os.path.join(PROJECT, args['image'])
-YOLO_DIR = os.path.join(PROJECT, args['yolo'])
+CONFIDENCE_CUTOFF   = args['confidence']
+NMS_THRESHOLD       = args['threshold']
+FACE_MODEL_PATH     = args['model']
+
 CURRENT_NUM_SAMPLES = len(glob(os.path.join(SAMPLE_DIR, '*.jpg')))
-
-CONFIDENCE_CUTOFF = args['confidence']
-NMS_THRESHOLD = args['threshold']
-
-FACE_RECOG_MODEL = args['model']
-LABELS = ['Cuong','Minh','Nam','Brad']
+FACE_MODEL = InceptionResNetV1()
+FACE_MODEL.load_weights(FACE_MODEL_PATH)
 
 
 ################################################################################
 ######################        DEFINING FUNCTIONS        ########################
 ################################################################################
-def predict_frame(net, frame):
+def normalize(img):
+    mean, std = img.mean(), img.std()
+    return (img - mean) / std
+
+
+def load_data():
+    N = sum([len(files) for _,_,files in os.walk(DATA_DIR)])-1
+    labels = [os.path.basename(d) for d in glob(os.path.join(DATA_DIR,'*'))]
+    X = np.zeros((N, N_FEATURES))
+    y = np.empty(N, dtype=object)
+    i = 0
+    for lbl in labels:
+        images = glob(os.path.join(DATA_DIR,lbl,'*'))
+        for image in images:
+            img = cv2.imread(image)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = normalize(img)
+            img = tf.image.resize(img, [CROP_W,CROP_H])
+            try:
+                ext_features = FACE_MODEL(np.array([img]), training=False)
+            except TypeError:
+                ext_features = FACE_MODEL(np.array([img]))
+            X[i] = ext_features
+            y[i] = lbl
+            i += 1
+
+    return (X,y)
+
+
+
+
+def predict_boxes(frame):
     blob = cv2.dnn.blobFromImage(frame,
                                  1/255,
                                  (IMG_WIDTH, IMG_HEIGHT),
@@ -55,13 +100,11 @@ def predict_frame(net, frame):
 
     net.setInput(blob)
     outs = net.forward(OUTPUT_LAYERS)
-    return outs
 
-
-def get_final_boxes(outs, frame_height, frame_width):
     confidences = []
     boxes = []
 
+    frame_h, frame_w = frame.shape[:2]
     # Each frame produces 3 outs corresponding to 3 output layers
     for out in outs:
         # One out has multiple predictions for multiple captured objects.
@@ -69,10 +112,11 @@ def get_final_boxes(outs, frame_height, frame_width):
             confidence = detection[-1]
             # Extract position data of face area (only area with high confidence)
             if confidence > CONFIDENCE_CUTOFF:
-                center_x = int(round(detection[0] * frame_width))
-                center_y = int(round(detection[1] * frame_height))
-                width    = int(round(detection[2] * frame_width))
-                height   = int(round(detection[3] * frame_height))
+
+                center_x = int(round(detection[0] * frame_w))
+                center_y = int(round(detection[1] * frame_h))
+                width    = int(round(detection[2] * frame_w))
+                height   = int(round(detection[3] * frame_h))
 
                 # Find the top left point of the bounding box
                 topleft_x = center_x - width//2
@@ -84,61 +128,97 @@ def get_final_boxes(outs, frame_height, frame_width):
     # redundant overlapping boxes with lower confidences.
     indices = cv2.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_CUTOFF, NMS_THRESHOLD)
     final_boxes = [boxes[i[0]] for i in indices]
-    final_confidences = [confidences[i[0]] for i in indices]
 
-    return (final_boxes, final_confidences)
-
+    return final_boxes
 
 
-def draw_final_boxes(frame, final_boxes, final_confidences, model):
-    num_faces_detected = len(final_boxes)
+
+def predict_faces(frame):
+    global flag_thread_finished, buffer_boxes, buffer_labels, buffer_confidences
+    flag_thread_finished = False
+
+    buffer_boxes = predict_boxes(frame)
+    buffer_labels, buffer_confidences = [],[]
+    num_faces_detected = len(buffer_boxes)
     if num_faces_detected > 0:
-        for i,box in enumerate(final_boxes):
-            # Extract position data
-            l,t,w,h = box[:4]
-            crop = cv2.cvtColor(frame[t:t+h, l:l+w], cv2.COLOR_BGR2RGB)
-            crop = tf.image.resize(crop, [128,128])
-            pred = model(np.array([crop])/255, training=False)
-            label_idx = np.argmax(pred[0])
+        try:
+            for box in buffer_boxes:
+                # Extract position data
+                margin = 5
+                l,t,w,h = box[:4]
+                l -= margin
+                t -= margin
+                w += margin
+                h += margin
 
-            # Draw bounding box with the above measurements
-            tl = (l,t)
-            br = (l+w, t+h)
-            cv2.rectangle(frame,
-                          tl,
-                          br,
-                          BOX_COLOR,
-                          2)
+                crop = cv2.cvtColor(frame[t:t+h, l:l+w], cv2.COLOR_BGR2RGB)
+                crop = normalize(crop)
+                crop = tf.image.resize(crop, [CROP_W,CROP_H])
+                try:
+                    features = FACE_MODEL(np.array([crop]), training=False)
+                except TypeError:
+                    features = FACE_MODEL(np.array([crop]))
+                
+                k_dist, k_idx = knn.kneighbors(features, n_neighbors=KNN_K)
+
+                flag_unknown = (k_dist[0] > KNN_CUTOFF_DIST).sum() > 0
+                if flag_unknown:
+                    label = '???'
+                    proba = 0
+                else:
+                    M = stats.mode(y_train[k_idx[0]])
+                    label = M[0][0]
+                    proba = M[1][0]/KNN_K
+
+                buffer_labels.append(label)
+                buffer_confidences.append(proba)
+        except:
+            pass
+
+    flag_thread_finished = True
+
+    #return (final_boxes, final_labels, final_proba)
 
 
-            # Display text about confidence rate above each box
-            text_confidence = f'{LABELS[label_idx]} - {pred[0,label_idx]:.2f}'
-            text_origin = (l,t-10)
-            cv2.putText(frame,
-                        text_confidence,
-                        text_origin,
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        BOX_COLOR,
-                        2)
-
-        # Display text about number of detected faces on topleft corner
-        text_num_faces = f'Faces detected: {num_faces_detected}'
-        cv2.putText(frame,
-                    text_num_faces,
-                    TEXT_ORIGIN_FACES,
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    BOX_COLOR,
-                    2)
 
 
-    
+def draw_final_boxes(frame, final_boxes, final_labels, final_proba):
+    num_faces_detected = len(final_boxes)
+    for i,box in enumerate(final_boxes):
+        # Extract position data
+        l,t,w,h = box[:4]
+
+        # Draw bounding box with the above measurements
+        tl = (l,t)
+        br = (l+w, t+h)
+        cv2.rectangle(frame, tl, br,
+                      BOX_COLOR, 2)
+
+        # Display text about confidence rate above each box
+        try:
+            display_label = final_labels[i]
+            display_proba = final_proba[i]
+        except IndexError:
+            display_label = '???'
+            display_proba = 0
+        text_confidence = f'{display_label} - {display_proba:.2f}'
+        text_origin = (l,t-10)
+        cv2.putText(frame, text_confidence, text_origin,
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, BOX_COLOR, 2)
+
+    # Display text about number of detected faces on topleft corner
+    text_num_faces = f'Faces detected: {num_faces_detected}'
+    cv2.putText(frame, text_num_faces, TEXT_ORIGIN_FACES,
+                cv2.FONT_HERSHEY_SIMPLEX, 1, BOX_COLOR, 2)
+
+
 
 
 ################################################################################
 ######################        LOADING THE MODEL        #########################
 ################################################################################
+
+### Face Detection ###
 try:
     filename = '*.cfg'
     MODEL  = glob(os.path.join(YOLO_DIR, filename))[0]
@@ -152,11 +232,14 @@ except IndexError as err:
 net = cv2.dnn.readNetFromDarknet(MODEL, WEIGHT)
 net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
 net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-
 OUTPUT_LAYERS = net.getUnconnectedOutLayersNames()
 
-face_rec = tf.keras.models.load_model(FACE_RECOG_MODEL)
-
+### Face Identification ###
+print('\n>>> Loading data...')
+knn = KNeighborsClassifier(n_neighbors=KNN_K)
+X_train, y_train = load_data()
+knn.fit(X_train, y_train)
+print('...Done')
 
 ################################################################################
 ####################         RUNNING THE CAMERA           ######################
@@ -164,6 +247,8 @@ face_rec = tf.keras.models.load_model(FACE_RECOG_MODEL)
 draw_boxes = True
 cap = cv2.VideoCapture(0)
 
+flag_thread_finished = True
+buffer_boxes, buffer_labels, buffer_confidences = [],[],[]
 # Check if the webcam is opened correctly
 if not cap.isOpened():
     raise IOError("Cannot open webcam")
@@ -171,19 +256,22 @@ if not cap.isOpened():
 while True:
     ret, frame = cap.read()
 
+
     ####################
     ## FACE DETECTION ##
     ####################
-    predictions = predict_frame(net, frame)
-    final_boxes, final_confidences = get_final_boxes(predictions, frame.shape[0], frame.shape[1])
+    if flag_thread_finished:
+        cache_boxes = buffer_boxes.copy()
+        cache_labels = buffer_labels.copy()
+        cache_confidences = buffer_confidences.copy()
+        Thread(target=predict_faces, args=[frame]).start()
 
     if draw_boxes:
-        draw_final_boxes(frame, final_boxes, final_confidences, face_rec)
+        draw_final_boxes(frame, cache_boxes, cache_labels, cache_confidences)
 
 
     # frame is now the image capture by the webcam (one frame of the video)
     cv2.imshow('Input', frame)
-
 
     c = cv2.waitKey(1)
 
@@ -199,5 +287,7 @@ while True:
     elif c == 27:           # Break when pressing ESC
         break
 
+
 cap.release()
 cv2.destroyAllWindows()
+
