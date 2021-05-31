@@ -2,6 +2,7 @@ import numpy as np
 import os
 import cv2
 import argparse
+import tensorflow as tf
 from glob import glob
 
 
@@ -21,6 +22,8 @@ ap.add_argument("-i", "--image", required=True,
                 help="name of the sub-directory for saving image")
 ap.add_argument("-y", "--yolo", required=True,
                 help="name of the sub-directory containing the YOLO model and weights")
+ap.add_argument('-m', '--model', required=True,
+                help='path to the .h5 file of the tensorflow model')
 ap.add_argument("-c", "--confidence", type=float, default=0.5,
                 help="minimum probability to filter weak detections")
 ap.add_argument("-t", "--threshold", type=float, default=0.4,
@@ -35,7 +38,8 @@ CURRENT_NUM_SAMPLES = len(glob(os.path.join(SAMPLE_DIR, '*.jpg')))
 CONFIDENCE_CUTOFF = args['confidence']
 NMS_THRESHOLD = args['threshold']
 
-
+FACE_RECOG_MODEL = args['model']
+LABELS = ['Cuong','Minh','Nam','Brad']
 
 
 ################################################################################
@@ -85,19 +89,21 @@ def get_final_boxes(outs, frame_height, frame_width):
     return (final_boxes, final_confidences)
 
 
-def draw_final_boxes(frame, final_boxes, final_confidences):
+
+def draw_final_boxes(frame, final_boxes, final_confidences, model):
     num_faces_detected = len(final_boxes)
     if num_faces_detected > 0:
         for i,box in enumerate(final_boxes):
             # Extract position data
-            left   = box[0]
-            top    = box[1]
-            width  = box[2]
-            height = box[3]
+            l,t,w,h = box[:4]
+            crop = cv2.cvtColor(frame[t:t+h, l:l+w], cv2.COLOR_BGR2RGB)
+            crop = tf.image.resize(crop, [128,128])
+            pred = model(np.array([crop])/255, training=False)
+            label_idx = np.argmax(pred[0])
 
             # Draw bounding box with the above measurements
-            tl = (left, top)
-            br = (left+width, top+height)
+            tl = (l,t)
+            br = (l+w, t+h)
             cv2.rectangle(frame,
                           tl,
                           br,
@@ -106,8 +112,8 @@ def draw_final_boxes(frame, final_boxes, final_confidences):
 
 
             # Display text about confidence rate above each box
-            text_confidence = f'{final_confidences[i]:.2f}'
-            text_origin = (left, top-10)
+            text_confidence = f'{LABELS[label_idx]} - {pred[0,label_idx]:.2f}'
+            text_origin = (l,t-10)
             cv2.putText(frame,
                         text_confidence,
                         text_origin,
@@ -125,6 +131,9 @@ def draw_final_boxes(frame, final_boxes, final_confidences):
                     1,
                     BOX_COLOR,
                     2)
+
+
+    
 
 
 ################################################################################
@@ -146,7 +155,7 @@ net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
 OUTPUT_LAYERS = net.getUnconnectedOutLayersNames()
 
-
+face_rec = tf.keras.models.load_model(FACE_RECOG_MODEL)
 
 
 ################################################################################
@@ -167,8 +176,9 @@ while True:
     ####################
     predictions = predict_frame(net, frame)
     final_boxes, final_confidences = get_final_boxes(predictions, frame.shape[0], frame.shape[1])
+
     if draw_boxes:
-        draw_final_boxes(frame, final_boxes, final_confidences)
+        draw_final_boxes(frame, final_boxes, final_confidences, face_rec)
 
 
     # frame is now the image capture by the webcam (one frame of the video)
@@ -179,11 +189,8 @@ while True:
 
     if c == ord('c'):       # Save part of the frame cropped by the bounding box
         box = final_boxes[0]
-        left   = box[0]
-        top    = box[1]
-        width  = box[2]
-        height = box[3]
-        cv2.imwrite(os.path.join(SAMPLE_DIR,f'{CURRENT_NUM_SAMPLES}.jpg'), frame[top:top+height, left:left+width])
+        l,t,w,h = box[:4]
+        cv2.imwrite(os.path.join(SAMPLE_DIR,f'{CURRENT_NUM_SAMPLES}.jpg'), frame[t:t+h, l:l+w])
         CURRENT_NUM_SAMPLES += 1
 
     elif c == ord('d'):     # Turn on/off bounding boxes
